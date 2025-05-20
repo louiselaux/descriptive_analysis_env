@@ -81,7 +81,8 @@ table_reg_stl<- t %>%pivot_longer(cols=c("CHLA","NO3","S","SIOH4","T"))
 table_reg_stl<- table_reg_stl%>%select(-year)
 
 ##### At the depth you choose #####
-table_reg_stl <-  table_reg_stl %>%filter(depth=="1")
+x<-10  # Put the depth you want
+table_reg_stl <-  table_reg_stl %>%filter(depth==x)
 
 
 dstl <- table_reg_stl %>%
@@ -234,13 +235,13 @@ dstl<- dstl%>%mutate(deseason=trend+remainder)
 #x$deseason_filled <- castr::interpolate(x=x$target_date, y=x$deseason, xout=x$target_date)
 
 
-#table_reg_stl_filled <- dstl %>%
-#  group_by(name) %>%
-#  mutate(deseason_filled = castr::interpolate(x = target_date,
-#                                              y = deseason,
-#                                              xout = target_date)) %>%
-# ungroup()
-#save(table_reg_stl_filled, file="table_reg_stl_filled.Rdata")
+table_reg_stl_filled_10 <- dstl %>%
+  group_by(name) %>%
+  mutate(deseason_filled = castr::interpolate(x = target_date,
+                                              y = deseason,
+                                              xout = target_date)) %>%
+ ungroup()
+table_reg_stl_filled_10 %>% write_tsv(file="data/table_reg_stl_filled_10.tsv.gz")
 
 #Figure 1: Inspection plots of the time series#
 
@@ -299,3 +300,5 @@ ggplot() +
     strip.background = element_rect(fill = "lightblue")
   )
 
+# Save dstl
+dstl %>% write_tsv(file="data/dstl.tsv.gz")
