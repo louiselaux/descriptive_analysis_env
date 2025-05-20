@@ -52,7 +52,7 @@ for (var in variables) {
 ##### Step 3 : Calculate the length of the cycle #####
 
 # Calculate ACF 
-acf_res <- acf(ts$S, lag.max = length(ts$S)/2, plot = FALSE)
+acf_res <- acf(r$T, lag.max = length(r$T)/2, plot = FALSE)
 
 # Extract lags and ACF
 lag_vals <- acf_res$lag[-1]
@@ -85,3 +85,45 @@ plot(lag_vals, acf_vals, type = "h",
      main = "Autocorrelogram", ylab = "ACF", xlab = "Lag")
 lines(lag_vals, acf_vals_smoothed, col = "red", lwd = 2)
 abline(v = peak_lag, col = "blue", lty = 2) 
+
+
+##### Step 4 : Look rather at the first peak after the down #####
+# First negative down
+first_negative_index <- which(acf_vals_smoothed < 0)[1]
+
+# First peak after down
+sub_indices <- seq(first_negative_index + 1, length(acf_vals_smoothed) - 1)
+
+# Value should be higher than neighbours
+is_local_peak <- function(i) {
+  acf_vals_smoothed[i] > acf_vals_smoothed[i - 1] &&
+    acf_vals_smoothed[i] > acf_vals_smoothed[i + 1]
+}
+
+# Look at the first i that satisfies this
+first_peak_index <- NA
+for (i in sub_indices) {
+  if (i > 1 && i < length(acf_vals_smoothed)) {
+    if (is_local_peak(i)) {
+      first_peak_index <- i
+      break
+    }
+  }
+}
+
+# If none, then say NA
+if (is.na(first_peak_index)) {
+  cat("No peak found\n")
+} else {
+  peak_lag <- lag_vals[first_peak_index]
+  period_weeks <- peak_lag * 2
+  period_years <- period_weeks / 52
+  cat("=> First peak after the down :", round(period_years, 2), "years\n")
+  
+  # Vizualize it
+  plot(lag_vals, acf_vals, type = "h",
+       main = "Autocorrelogramm", ylab = "ACF", xlab = "Lag")
+  lines(lag_vals, acf_vals_smoothed, col = "red", lwd = 2)
+  abline(v = peak_lag, col = "blue", lty = 2)
+}
+
