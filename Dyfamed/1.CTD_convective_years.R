@@ -354,5 +354,5 @@ env_hiver$cluster <- km$cluster
 # Convective cluster based on MLD:
 conv_clust <- which.max(tapply(env_hiver$mean_MLD, km$cluster, mean))
 env_hiver <- env_hiver %>%
-  mutate(convectif = (cluster == conv_clust))
+  mutate(convectif = (cluster == conv_clust)) gg
 env_hiver%>%filter(cluster==2)
