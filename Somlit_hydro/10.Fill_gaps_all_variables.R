@@ -138,9 +138,21 @@ clim <- tab %>% group_by(month, depth) %>% summarise(across(c(T, CHLA, NO3, S, O
 
 tabc <- tab %>% left_join(clim, by = c("month","depth")) 
 
-#Anomalies= value - clim per month
+nrow(tabc) == nrow(tab)
+anti_join(tab, clim, by = c("month","depth")) %>% nrow()
 
-tab_anom <- tabc %>% mutate(across(c(T, CHLA, NO3, S, O, SIOH4, MES), ~ . - get(paste0(cur_column(), "_clim")), .names = "{.col}_anom")) 
+# Anomalies= value - clim per month
+
+tab_anom <- tabc %>%
+  mutate( T_anom= T-T_clim,
+   CHLA_anom= CHLA- CHLA_clim,
+   NO3_anom= NO3-NO3_clim,
+   S_anom= S-S_clim,
+   O_anom= O-O_clim,
+   SIOH4_anom= SIOH4-SIOH4_clim,
+   MES_anom= MES-MES_clim)
+
+   
 
 
 # PCA on anomalies
@@ -169,81 +181,210 @@ X_anom <- tab_wide %>%
 
 X_anom_pca <- X_anom %>% select(-target_date)
 
-pca <- FactoMineR::PCA(X_anom_pca, axes =c(2,3))
+# PCA at 10 meters depth
+pca10 <- FactoMineR::PCA(X_anom_pca %>% select(ends_with("_10")), scale.unit=TRUE)
+
+# PCA at all depths 
+pca <- FactoMineR::PCA(X_anom_pca, axes =c(1,2))
 
 # Estimate the number of components to reconstruct the PCA
 
-ncp_est <- missMDA::estim_ncpPCA(X_anom_pca, scale = TRUE, method.cv=c("Kfold")) 
+#ncp_est <- missMDA::estim_ncpPCA(X_anom_pca, scale = TRUE, method.cv=c("Kfold")) 
 
-ncp_est$ncp # apparently it is 5
+ncp_est$ncp # apparently it is 5 
+
+# How many explained variance
+pca$eig
 
 # Impute the missing values
 
-res_anom <- missMDA::imputePCA(X_anom_pca, ncp = 5, scale = TRUE) 
+res_anom <- missMDA::imputePCA(X_anom_pca, ncp = 12, scale = TRUE) 
 
-imp_anom <- as.data.frame(res_anom$completeObs) 
 
-names(imp_anom) <- c("T_anom","CHLA_anom","NO3_anom","S_anom","O_anom", "SIOH4_anom", "MES_anom") 
+# Add the date column
+imp_anom <- res_anom$completeObs
+imp_anom <- dplyr::bind_cols(target_date = X_anom$target_date,
+                             as.data.frame(imp_anom))
 
-#  Recomposition = Imputed value = imputed anomaly + climatology (median per month)
 
+#####
+# Change the format
+clim_wide <- tab_wide %>%
+  select(target_date, var_depth, clim) %>%
+  tidyr::pivot_wider(names_from = var_depth, values_from = clim) %>%
+  arrange(target_date)
+
+# Recomposition : final value = anomaly imputed + climatology
+common_cols <- setdiff(intersect(names(imp_anom), names(clim_wide)), "target_date")
+
+final_wide <- imp_anom
+for (col in common_cols) {
+  final_wide[[col]] <- imp_anom[[col]] + clim_wide[[col]]
+}
+####
+
+# Get everything back to a normal data frame
 vars <- c("T","CHLA","NO3","S","O","SIOH4","MES")
 
-# Value_after
-after <- map_dfc(vars, function(v){
-  tibble(!!v := imp_anom[[paste0(v, "_anom")]] + tabc[[paste0(v, "_clim")]])
-}) %>%
-  bind_cols(tibble(target_date = tab$target_date), .)
+obs_long <- tablo_merged %>%
+  select(target_date, depth, all_of(vars)) %>%
+  pivot_longer(cols = all_of(vars), names_to = "var", values_to = "obs")
 
-# Data long: obs / recon / final / was_missing
-df_long <- map_dfr(vars, function(v){
-  tibble(
-    target_date = tab$target_date,
-    var         = v,
-    obs         = tab[[v]],
-    recon       = after[[v]]
-  )
-}) %>% mutate(was_missing = is.na(obs))
 
-#  Ranges of each variable
-ranges <- df_long %>%
-  group_by(var) %>%
-  summarise(
-    first = suppressWarnings(min(target_date[!is.na(obs)], na.rm = TRUE)),
-    last  = suppressWarnings(max(target_date[!is.na(obs)], na.rm = TRUE)),
-    .groups = "drop"
-  ) %>%
-  mutate(has_obs = is.finite(first) & is.finite(last))
-
-# Imputation only in the range of each variable
-df_long <- df_long %>%
-  left_join(ranges, by = "var") %>%
+df_long <- final_wide %>%
+  pivot_longer(cols = -target_date, names_to = "var_depth", values_to = "recon") %>%
+  tidyr::separate(var_depth, into = c("var","depth"), sep = "_", convert = TRUE) %>%
+  left_join(obs_long, by = c("target_date","depth","var")) %>%
+  group_by(var, depth) %>%
   mutate(
-    in_range  = has_obs & target_date >= first & target_date <= last,
-    # Last version of the series : in range or obs
-    final     = ifelse(was_missing & in_range, recon, obs),
-    show_red  = was_missing & in_range        # red : imputations
+    first   = suppressWarnings(min(target_date[!is.na(obs)], na.rm = TRUE)),
+    last    = suppressWarnings(max(target_date[!is.na(obs)], na.rm = TRUE)),
+    has_obs = is.finite(first) & is.finite(last),
+    in_range = has_obs & target_date >= first & target_date <= last,
+    was_missing = is.na(obs),
+    final = ifelse(was_missing & in_range, recon, obs),
+    show_red = was_missing & in_range
+  ) %>%
+  ungroup()
+
+# Clipping the reconstructed values
+bounds_final <- obs_long %>%
+  filter(!is.na(obs)) %>%
+  group_by(var, depth) %>%
+  summarise(q01f = quantile(obs, 0.01, na.rm=TRUE),
+            q99f = quantile(obs, 0.99, na.rm=TRUE),
+            .groups="drop")
+
+df_long <- df_long %>%
+  left_join(bounds_final, by=c("var","depth")) %>%
+  mutate(
+    final = ifelse(
+      was_missing & in_range,                      # only imputs
+      pmin(pmax(final, q01f), q99f),               # clip
+      final                                        
+    )
   )
 
-# Plots
-ggplot(df_long, aes(x = target_date)) +
+# See if worked
+ggplot(df_long%>%filter(var=="T"), aes(x = target_date)) +
   geom_line(aes(y = final)) +
   geom_point(data = subset(df_long, !was_missing),
-             aes(y = obs), color = "black", size = 1.1, alpha = 0.85) +
+             aes(y = obs), size = 1.0, alpha = 0.85) +
   geom_point(data = subset(df_long, show_red),
-             aes(y = recon), color = "red", size = 1.3) +
-  facet_wrap(~ var, scales = "free_y") +
+             aes(y = recon), color = "red", size = 1.2) +
+  facet_grid(var ~ depth, scales = "free_y") +
   theme_bw() +
-  labs(x = "Date", y = NULL,
-       title = "Observed vs imputed")
+  labs(x = "Date", y = NULL, title = "Observed vs imputed (by depth)")
 
-# Final data table
-final_wide <- df_long %>%
-  select(target_date, var, final) %>%
-  pivot_wider(names_from = var, values_from = final)
+ggplot(df_long %>% filter(var=="T"), aes(x = target_date)) +
+  geom_line(aes(y = final)) +
+  geom_point(data = subset(df_long, !was_missing),
+             aes(y = obs), size = 1.0, alpha = 0.85) +
+  geom_point(data = subset(df_long, show_red),
+             aes(y = final), color = "red", size = 1.2) +   
+  facet_grid(var ~ depth, scales = "free_y") +
+  theme_bw()
 
 
-# Check this out
-final_wide %>% ggplot() + geom_path(aes(x=target_date,y=T)) + theme_bw()
+ggplot(df_long %>% filter(var == "T") %>% mutate(year=year(target_date))%>%filter(year=="1995"), aes(x = target_date)) +geom_line(aes(y = final)) +
+  geom_point(data = subset(df_long, var == "T" & !was_missing),
+             aes(y = obs), size = 1.0, alpha = 0.85) +
+  geom_point(data = subset(df_long, var == "T" & show_red),
+             aes(y = final), color = "red", size = 1.2) +
+  facet_wrap(~ depth, scales = "free_y", ncol = 1) +
+  theme_bw() +
+  labs(x = "Date", y = "Temperature (°C)",
+       title = "Observed vs imputed Temperature by depth")
+
+# Focus year 1995
+df_T_1995 <- df_long %>%
+  filter(var == "T", year(target_date) %in% c(1993,1994,1995))
+
+ggplot(df_T_1995, aes(x = target_date)) +
+  geom_line(aes(y = final)) +
+  geom_point(data = df_T_1995 %>% filter(!was_missing),
+             aes(y = obs), size = 1.0, alpha = 0.85) +
+  geom_point(data = df_T_1995 %>% filter(show_red),
+             aes(y = final), color = "red", size = 1.2) +
+  facet_wrap(~ depth, scales = "free_y", ncol = 1) +
+  theme_bw() +
+  labs(x = "Date", y = "Temperature (°C)",
+       title = "Observed vs imputed Temperature by depth — 1995") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b")
+
+# Final data frame
+final_panel <- df_long %>%
+  select(target_date, depth, var, final) %>%
+  pivot_wider(names_from = var, values_from = final) %>%
+  arrange(depth, target_date) 
+
+# Save it 
+readr::write_tsv(final_panel, "data/final_panel_by_depth.tsv")
 
 write_tsv(final_wide, file="data/final_wide.tsv")
+
+
+##### Comparison with raw data and not anomaly ####
+vars <- c("T","CHLA","NO3","S","O","SIOH4","MES")
+
+obs_long <- tablo_merged %>%
+  select(target_date, depth, all_of(vars)) %>%
+  pivot_longer(cols = all_of(vars), names_to = "var", values_to = "obs")
+
+X_raw <- tablo_merged %>%
+  select(target_date, depth, all_of(vars)) %>%
+  pivot_longer(cols = all_of(vars), names_to="var", values_to="val") %>%
+  mutate(var_depth = paste0(var, "_", depth)) %>%
+  select(target_date, var_depth, val) %>%
+  pivot_wider(names_from = var_depth, values_from = val) %>%
+  arrange(target_date)
+
+X_raw_pca <- X_raw %>% select(-target_date)
+
+res_raw <- missMDA::imputePCA(X_raw_pca, ncp = 8, scale = TRUE)
+
+imp_raw <- dplyr::bind_cols(
+  target_date = X_raw$target_date,
+  as.data.frame(res_raw$completeObs)
+)
+
+df_long_raw <- imp_raw %>%
+  pivot_longer(cols = -target_date, names_to = "var_depth", values_to = "recon") %>%
+  tidyr::separate(var_depth, into = c("var","depth"), sep = "_", convert = TRUE) %>%
+  left_join(obs_long, by = c("target_date","depth","var")) %>%
+  group_by(var, depth) %>%
+  mutate(
+    first      = suppressWarnings(min(target_date[!is.na(obs)], na.rm = TRUE)),
+    last       = suppressWarnings(max(target_date[!is.na(obs)], na.rm = TRUE)),
+    has_obs    = is.finite(first) & is.finite(last),
+    in_range   = has_obs & target_date >= first & target_date <= last,
+    was_missing = is.na(obs),
+    final      = ifelse(was_missing & in_range, recon, obs),  
+    show_red   = was_missing & in_range
+  ) %>%
+  ungroup()
+
+ggplot(df_long_raw %>% filter(var=="T"), aes(target_date)) +
+  geom_line(aes(y = final)) +
+  geom_point(data = subset(df_long_raw, !was_missing),
+             aes(y = obs), size=1, alpha=.85) +
+  geom_point(data = subset(df_long_raw, show_red),
+             aes(y = final), color="red", size=1.2) +
+  facet_grid(var ~ depth, scales = "free_y") +
+  theme_bw()
+
+# Focus on year 1995
+df_T_1995 <- df_long_raw %>%
+  filter(var == "T", year(target_date) %in% c(1994))
+
+ggplot(df_T_1995, aes(x = target_date)) +
+  geom_line(aes(y = final)) +
+  geom_point(data = df_T_1995 %>% filter(!was_missing),
+             aes(y = obs), size = 1.0, alpha = 0.85) +
+  geom_point(data = df_T_1995 %>% filter(show_red),
+             aes(y = final), color = "red", size = 1.2) +
+  facet_wrap(~ depth, scales = "free_y", ncol = 1) +
+  theme_bw() +
+  labs(x = "Date", y = "Temperature (°C)",
+       title = "Observed vs imputed Temperature by depth — 1995") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b")
