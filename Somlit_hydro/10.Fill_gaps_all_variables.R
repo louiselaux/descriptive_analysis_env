@@ -26,7 +26,7 @@ std_pivot<- as.data.frame(std_pivot)
 head(std_pivot)
 
 
-### Estimate the length of gaps ###
+### Estimate the length of gaps ### 
 ref <- tibble(
   target_date = seq(from = as.Date("1967-01-05"), to = as.Date("2022-12-31"), by = 14),
   year = year(target_date)
@@ -388,3 +388,6 @@ ggplot(df_T_1995, aes(x = target_date)) +
   labs(x = "Date", y = "Temperature (°C)",
        title = "Observed vs imputed Temperature by depth — 1995") +
   scale_x_date(date_breaks = "1 month", date_labels = "%b")
+
+
+
