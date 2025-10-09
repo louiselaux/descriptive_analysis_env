@@ -191,7 +191,7 @@ pca <- FactoMineR::PCA(X_anom_pca, axes =c(1,2))
 
 #ncp_est <- missMDA::estim_ncpPCA(X_anom_pca, scale = TRUE, method.cv=c("Kfold")) 
 
-ncp_est$ncp # apparently it is 5 
+#ncp_est$ncp # apparently it is 5 
 
 # How many explained variance
 pca$eig
@@ -259,7 +259,7 @@ df_long <- df_long %>%
   left_join(bounds_final, by=c("var","depth")) %>%
   mutate(
     final = ifelse(
-      was_missing & in_range,                      # only imputs
+      was_missing & in_range,                      # only inputs
       pmin(pmax(final, q01f), q99f),               # clip
       final                                        
     )
@@ -389,5 +389,233 @@ ggplot(df_T_1995, aes(x = target_date)) +
        title = "Observed vs imputed Temperature by depth — 1995") +
   scale_x_date(date_breaks = "1 month", date_labels = "%b")
 
+##### Impute large holes from Random Forest #####
+library("missForest")
+library("doParallel")
+X_anom_pca <- as.data.frame(X_anom_pca)
+cl <- makeCluster(6) 
+registerDoParallel(cl) 
 
+imp_rf <- missForest(X_anom_pca, ntree=300, nodesize=c(2,5), parallelize="variables", variablewise=TRUE, maxiter=20) 
+stopCluster(cl)
+
+
+
+error <- tibble(
+  var= imp_rf$ximp |> names(),
+  RMSE=sqrt(imp_rf$OOBerror),
+  abs_mean=colMeans(abs(imp_rf$ximp), na.rm=TRUE),
+  # NB: some values are negative => to estimate the average "size" of the variable we take the absolute value
+  rel_error=RMSE/abs_mean
+) |>
+  arrange(rel_error) |>
+  print()
+
+## Get a data_table with all values
+imp_rf_anom <- dplyr::bind_cols(
+  target_date = X_anom$target_date,
+  as.data.frame(imp_rf$ximp)
+)
+
+## Re-add the anomaly
+common_cols <- setdiff(intersect(names(imp_rf_anom), names(clim_wide)), "target_date")
+
+final_wide_rf <- imp_rf_anom
+for (col in common_cols) {
+  final_wide_rf[[col]] <- imp_rf_anom[[col]] + clim_wide[[col]]
+}
+
+write_tsv(final_wide_rf, file="data/final_wide_rf.tsv")
+
+## Rechange the format as for PCA #####
+vars <- c("T","CHLA","NO3","S","O","SIOH4","MES")
+
+obs_long <- tablo_merged %>%
+  select(target_date, depth, all_of(vars)) %>%
+  tidyr::pivot_longer(cols = all_of(vars), names_to = "var", values_to = "obs")
+
+df_long_rf <- final_wide_rf %>%
+  tidyr::pivot_longer(cols = -target_date, names_to = "var_depth", values_to = "recon") %>%
+  tidyr::separate(var_depth, into = c("var","depth"), sep = "_", convert = TRUE) %>%
+  dplyr::left_join(obs_long, by = c("target_date","depth","var")) %>%
+  dplyr::group_by(var, depth) %>%
+  dplyr::mutate(
+    first      = suppressWarnings(min(target_date[!is.na(obs)], na.rm = TRUE)),
+    last       = suppressWarnings(max(target_date[!is.na(obs)], na.rm = TRUE)),
+    has_obs    = is.finite(first) & is.finite(last),
+    in_range   = has_obs & target_date >= first & target_date <= last,
+    was_missing = is.na(obs),
+    final      = ifelse(was_missing & in_range, recon, obs),
+    show_red   = was_missing & in_range
+  ) %>%
+  dplyr::ungroup()
+
+head(df_long_rf)
+
+
+ggplot(df_long_rf %>% filter(var=="T"), aes(x = target_date)) +
+  geom_line(aes(y = final)) +
+  geom_point(data = subset(df_long, !was_missing),
+             aes(y = obs), size = 1.0, alpha = 0.85) +
+  geom_point(data = subset(df_long, show_red),
+             aes(y = final), color = "red", size = 1.2) +   
+  facet_grid(var ~ depth, scales = "free_y") +
+  theme_bw()
+
+# Save the output for imputation with random forest somewhere 
+head(df_long_rf)
+
+readr::write_tsv(df_long_rf, "data/df_long_rf.tsv")
+final_panel_rf <- df_long_rf %>%
+  select(target_date, depth, var, final) %>%
+  pivot_wider(names_from = var, values_from = final) %>%
+  arrange(depth, target_date) 
+
+head(final_panel_rf)
+write_tsv(final_panel_rf, "data/final_panel_rf.tsv")
+
+##### Compare PCA and RF #####
+cmp <- df_long %>%
+  select(target_date, depth, var, final_pca = final, was_missing_pca = was_missing, in_range_pca = in_range) %>%
+  left_join(
+    df_long_rf %>%
+      select(target_date, depth, var, final_rf = final, was_missing_rf = was_missing, in_range_rf = in_range),
+    by = c("target_date","depth","var")
+  ) %>%
+  mutate(
+    imput_flag = (was_missing_pca | was_missing_rf) & (in_range_pca | in_range_rf),
+    diff = final_rf - final_pca,
+    mean_pair = 0.5*(final_rf + final_pca),
+    abs_diff = abs(diff)
+  )
+
+
+# Metrics to compare the two
+metrics_global <- cmp %>%
+  filter(imput_flag) %>%
+  summarise(
+    n = n(),
+    bias = mean(diff, na.rm=TRUE),
+    mae  = mean(abs_diff, na.rm=TRUE),
+    rmse = sqrt(mean(diff^2, na.rm=TRUE))
+  )
+
+# By variable and depth
+metrics_by_vardepth <- cmp %>%
+  filter(imput_flag) %>%
+  group_by(var, depth) %>%
+  summarise(
+    n = n(),
+    bias = mean(diff, na.rm=TRUE),
+    mae  = mean(abs_diff, na.rm=TRUE),
+    rmse = sqrt(mean(diff^2, na.rm=TRUE)),
+    .groups="drop"
+  ) %>%
+  arrange(var, depth)
+
+metrics_global
+head(metrics_by_vardepth, 20)
+
+ggplot(cmp %>% filter(imput_flag & var %in% c("S","MES")), aes(x = final_pca, y = final_rf)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  facet_wrap(~ var + depth, scales = "free") +
+  theme_bw() +
+  labs(x = "PCA (final)", y = "RF (final)", title = "PCA vs RF ")
+
+ggplot(cmp %>% filter(imput_flag), aes(x = final_pca, y = final_rf)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  facet_grid(depth ~ var, scales = "free") +  
+  theme_bw() +
+  labs(x = "PCA (final)", y = "RF (final)", title = "PCA vs RF — points imputés")
+
+
+
+ggplot(cmp %>% filter(var == "T", depth == 10), aes(x = target_date)) +
+  geom_line(aes(y = final_pca), size = 0.3, color="red") +
+  geom_line(aes(y = final_rf), size = 0.3, color="lightgreen") +
+  theme_bw() +
+  labs(x = "Date", y = NULL, title = "")
+
+top_diffs <- cmp %>%
+  filter(imput_flag) %>%
+  arrange(desc(abs_diff)) %>%
+  select(target_date, var, depth, final_pca, final_rf, diff, abs_diff) %>%
+  head(50)
+
+head(top_diffs, 10)
+
+
+##### Check the conclusions points #####
+std %>%
+  group_by(depth, name) %>%
+  summarise(
+    n_tot = n(),
+    n_na = sum(is.na(value)),
+    perc_na = 100 * n_na / n_tot,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(perc_na))
+
+std %>%
+  group_by(depth, name) %>%
+  summarise(
+    n_total = n(),
+    n_na = sum(is.na(value)),
+    perc_na = 100 * n_na / n_total,
+    .groups = "drop"
+  ) %>%
+  arrange(perc_na)%>%print(n=70)
+
+std %>% ggplot() + geom_point(aes(x=date, y=value))+ facet_grid(depth~name, scales="free_x")
+
+
+
+# A plot to confirm
+# Focus year 1995
+df_T_1994 <- cmp %>%
+  filter(var == "T", year(target_date) %in% c(1993,1994,1995))
+
+ggplot(df_T_1994, aes(x = target_date)) +
+  geom_point(aes(x=target_date,y=final_pca), color="blue")+
+  geom_point(aes(x=target_date, y=final_rf), color="red")+ facet_wrap(~depth, scales="free_y")+theme_bw()
+
+
+#####Test to compare the two #####
+
+set.seed(9)
+
+mask <- !is.na(X_anom_pca)
+test_mask <- matrix(runif(length(mask)) < 0.4 & mask, nrow = nrow(mask))
+
+X_test <- X_anom_pca
+X_test[test_mask] <- NA  
+
+# With RF
+res_rf_test <- missForest(
+  X_test,
+  ntree = 300,
+  maxiter = 10,
+  verbose = TRUE,
+  parallelize = "no"                          
+)$ximp
+
+# With PCA
+res_pca_test <- missMDA::imputePCA(as.data.frame(X_test), ncp = 12, scale = TRUE)$completeObs
+
+# Compare
+diff_pca <- as.matrix(X_anom_pca)[test_mask] - as.matrix(res_pca_test)[test_mask]
+diff_rf  <- as.matrix(X_anom_pca)[test_mask] - as.matrix(res_rf_test)[test_mask]
+
+tibble(
+  method = c("PCA", "RF"),
+  bias = c(mean(diff_pca), mean(diff_rf)),
+  mae  = c(mean(abs(diff_pca)), mean(abs(diff_rf))),
+  rmse = c(sqrt(mean(diff_pca^2)), sqrt(mean(diff_rf^2)))
+)
+
+# How many were masked 
+prop_masked <- mean(test_mask[mask])
+prop_masked
 
