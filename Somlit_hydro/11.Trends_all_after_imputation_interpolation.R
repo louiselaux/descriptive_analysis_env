@@ -14,24 +14,27 @@ library(nlme)
 
 ##### Load the data table#####
 
-final_wide <- read_tsv("data/final_wide.tsv")
+final_wide <- read_tsv("data/final_wide_rf.tsv")
+final_panel <- read_tsv("data/final_panel_rf.tsv")
 head(final_wide)
 final_wide <- as.data.frame(final_wide)
-
+final_panel<- as.data.frame(final_panel)
 
 # Log the chla variable, log10+1 to better deal with 0 that will be -inf otherwise
-final_wide <- final_wide %>%mutate(
-  CHLA_10= log10(CHLA_10+1)
+final_panel <- final_panel %>%mutate(
+  CHLA= log10(CHLA+1)
 )
 
 
-final_wide <- final_wide %>% select(target_date,T_10,CHLA_10,NO3_10,S_10,O_10,SIOH4_10,MES_10)
-table_reg_stl <- final_wide %>% pivot_longer(cols=c("T_10","CHLA_10","NO3_10","S_10","O_10","SIOH4_10","MES_10"), names_to="name", values_to="value")
+#final_wide <- final_wide %>% select(target_date,T_10,CHLA_10,NO3_10,S_10,O_10,SIOH4_10,MES_10)
+
+final_panel <- final_panel %>% filter(depth=="10")
+table_reg_stl <- final_panel %>% pivot_longer(cols=c("T","CHLA","NO3","S","O","SIOH4","MES"), names_to="name", values_to="value")
 head(table_reg_stl)
 
 ##### STL decomposition #####
 
-dstl <- table_reg_stl %>% filter(name %in% c("T_10","CHLA_10","NO3_10","S_10","O_10","SIOH4_10"))%>%
+dstl <- table_reg_stl %>% filter(name %in% c("T","CHLA","NO3","S","O","SIOH4"))%>%
   group_by(name) %>%
   group_modify(.f=function(x,y) {
     # message(y)
@@ -71,7 +74,7 @@ dstl %>%
 
 head(dstl)
 
-write_tsv(dstl, file="data/dstl_interpolated_before.tsv")
+#write_tsv(dstl, file="data/dstl_interpolated_before.tsv")
 ##### Gls regression #####
 #Second step : STL decomposition
 ## GLS regression ----
@@ -165,7 +168,7 @@ stats <- stats %>%
 
 # Save it 
 
-write_tsv(stats, file="data/stats_interpolated_before.tsv")
+#write_tsv(stats, file="data/stats_interpolated_before.tsv")
 
 #save it
 dstl<- dstl%>%mutate(deseason=trend+remainder)
@@ -173,8 +176,8 @@ dstl<- dstl%>%mutate(deseason=trend+remainder)
 
 ggplot() +
   facet_wrap(name~., scales="free_y", ncol=1) +
-  geom_path(aes(target_date, deseason), data=dstl%>%filter(name %in% c("CHLA_10","T_10","S_10","O_10","NO3_10"))) +
-  geom_abline(aes(slope=gls_slope, intercept=gls_intercept), data=stats%>%filter( gls_signif %in% c("*", "**", "***")), colour="red", size=1.5, alpha=0.7) +
+  geom_path(aes(target_date, deseason), data=dstl%>%filter(name %in% c("CHLA","T","S","O","NO3"))) +
+  geom_abline(aes(slope=gls_slope, intercept=gls_intercept), data=stats%>%filter( gls_signif %in% c("*", "**", "***"))%>%filter(name %in% c("CHLA","T","S","O","NO3")), colour="red", size=1.5, alpha=0.7) +
   #geom_abline(aes(slope=slope.gls, intercept=intercept.gls), data=subset(statsp2, signif.gls %in% c("*", "**", "***")), colour="pink", size=0.75, alpha=0.7) + theme(axis.title.y=element_blank()) + #when plotting 2nd line for recent years
   xlab("Date") +
   ylab("Deseasonalized component") +
